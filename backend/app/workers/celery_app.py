@@ -20,4 +20,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
 )
 
-celery_app.autodiscover_tasks(["app.workers.tasks"])
+celery_app.autodiscover_tasks([
+    "app.workers.tasks.discover",
+    "app.workers.tasks.scrape_photos",
+    "app.workers.tasks.ocr",
+    "app.workers.tasks.classify",
+    "app.workers.tasks.generate_menu",
+])
