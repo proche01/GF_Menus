@@ -30,7 +30,8 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    # Official minio/minio was removed from Docker Hub; use maintained community image.
+    image: pgsty/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin

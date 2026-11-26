@@ -17,9 +17,13 @@ class StorageService:
 
     def __init__(self):
         settings = get_settings()
+        self._endpoint_url = settings.s3_endpoint_url
+        self._public_endpoint_url = (
+            settings.s3_public_endpoint_url or settings.s3_endpoint_url
+        )
         self._client = boto3.client(
             "s3",
-            endpoint_url=settings.s3_endpoint_url,
+            endpoint_url=self._endpoint_url,
             aws_access_key_id=settings.s3_access_key,
             aws_secret_access_key=settings.s3_secret_key,
         )
@@ -59,13 +63,16 @@ class StorageService:
         return key
 
     def get_photo_url(self, bucket: str, key: str, expires_in: int = 3600) -> str:
-        """Generate a presigned URL for a stored photo."""
+        """Generate a presigned URL for a stored photo (browser-reachable host)."""
         try:
             url = self._client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_in,
             )
+            # Rewrite Docker-internal host so browsers can fetch the object.
+            if self._endpoint_url and self._public_endpoint_url:
+                url = url.replace(self._endpoint_url, self._public_endpoint_url)
             return url
         except ClientError as e:
             logger.error("Failed to generate presigned URL: %s", e)
