@@ -47,7 +47,12 @@ class MenuPhoto(Base):
         index=True,
     )
     source: Mapped[str] = mapped_column(
-        Enum(PhotoSource, name="photo_source_enum", create_constraint=True),
+        Enum(
+            PhotoSource,
+            name="photo_source_enum",
+            values_callable=lambda enum: [member.value for member in enum],
+            create_constraint=True,
+        ),
         nullable=False,
     )
     s3_key: Mapped[str] = mapped_column(String(1000), nullable=False)
@@ -96,7 +101,12 @@ class MenuItem(Base):
         Boolean, default=False, server_default="false"
     )
     cross_contact_risk: Mapped[str] = mapped_column(
-        Enum(CrossContactRisk, name="cross_contact_risk_enum", create_constraint=True),
+        Enum(
+            CrossContactRisk,
+            name="cross_contact_risk_enum",
+            values_callable=lambda enum: [member.value for member in enum],
+            create_constraint=True,
+        ),
         default=CrossContactRisk.HIGH,
         server_default="high",
     )

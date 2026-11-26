@@ -2,9 +2,9 @@
 
 import uuid
 import logging
-from math import radians, cos
 
-from sqlalchemy import select, func, text, and_, case
+from geoalchemy2 import Geography, Geometry
+from sqlalchemy import cast, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.restaurant import Restaurant
@@ -36,49 +36,41 @@ class RestaurantService:
         Search restaurants by location with filtering and sorting.
         Returns (list of restaurant dicts with distance, total count).
         """
-        # PostGIS distance calculation in meters
-        point = func.ST_SetSRID(
-            func.ST_MakePoint(params.longitude, params.latitude), 4326
+        # PostGIS geography point for distance calculations
+        point = cast(
+            func.ST_SetSRID(
+                func.ST_MakePoint(params.longitude, params.latitude), 4326
+            ),
+            Geography,
         )
-        distance_col = func.ST_Distance(
-            Restaurant.location, func.cast(point, func.Geography)
-        ).label("distance_m")
+        distance_col = func.ST_Distance(Restaurant.location, point).label("distance_m")
+        lat_col = func.ST_Y(cast(Restaurant.location, Geometry)).label("latitude")
+        lng_col = func.ST_X(cast(Restaurant.location, Geometry)).label("longitude")
 
-        # Base query with distance
-        query = select(Restaurant, distance_col)
+        query = select(Restaurant, distance_col, lat_col, lng_col)
 
-        # Filter by radius
         radius_m = params.radius_km * 1000
-        query = query.where(
-            func.ST_DWithin(
-                Restaurant.location,
-                func.cast(point, func.Geography),
-                radius_m,
-            )
-        )
+        query = query.where(func.ST_DWithin(Restaurant.location, point, radius_m))
 
-        # Filter by min GF items
         if params.min_gf_items > 0:
             query = query.where(Restaurant.gf_item_count >= params.min_gf_items)
 
-        # Filter by dedicated GF menu
         if params.has_dedicated_gf_menu is not None:
             query = query.where(
                 Restaurant.has_dedicated_gf_menu == params.has_dedicated_gf_menu
             )
 
-        # Filter by gluten mentioned
         if params.gluten_mentioned is not None:
             query = query.where(
                 Restaurant.gluten_mentioned_on_menu == params.gluten_mentioned
             )
 
-        # Count total (before pagination)
-        count_query = select(func.count()).select_from(query.subquery())
+        count_query = select(func.count()).select_from(
+            query.with_only_columns(Restaurant.id).order_by(None).subquery()
+        )
         total_result = await self.db.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Sorting
         if params.sort_by.value == "distance":
             order_col = distance_col
         else:
@@ -89,7 +81,6 @@ class RestaurantService:
         else:
             query = query.order_by(order_col.asc())
 
-        # Pagination
         offset = (params.page - 1) * params.page_size
         query = query.offset(offset).limit(params.page_size)
 
@@ -103,6 +94,8 @@ class RestaurantService:
             restaurants.append({
                 "restaurant": restaurant,
                 "distance_km": round(distance_m / 1000, 2) if distance_m else None,
+                "latitude": float(row[2]) if row[2] is not None else 0.0,
+                "longitude": float(row[3]) if row[3] is not None else 0.0,
             })
 
         return restaurants, total
@@ -111,57 +104,52 @@ class RestaurantService:
         self, bounds: MapBoundsQuery, min_gf_items: int = 0
     ) -> list[dict]:
         """Get restaurant map pins within geographic bounds."""
-        # Build bounding box polygon
         bbox = func.ST_MakeEnvelope(
             bounds.west, bounds.south, bounds.east, bounds.north, 4326
         )
+        lat_col = func.ST_Y(cast(Restaurant.location, Geometry)).label("latitude")
+        lng_col = func.ST_X(cast(Restaurant.location, Geometry)).label("longitude")
 
-        query = select(Restaurant).where(
-            func.ST_Within(
-                func.cast(Restaurant.location, func.Geometry),
-                bbox,
-            )
+        query = select(Restaurant, lat_col, lng_col).where(
+            func.ST_Within(cast(Restaurant.location, Geometry), bbox)
         )
 
         if min_gf_items > 0:
             query = query.where(Restaurant.gf_item_count >= min_gf_items)
 
-        query = query.limit(200)  # Cap pins for performance
+        query = query.limit(200)
 
         result = await self.db.execute(query)
-        restaurants = result.scalars().all()
+        rows = result.all()
 
         return [
             {
-                "id": str(r.id),
-                "name": r.name,
-                "latitude": await self._extract_lat(r),
-                "longitude": await self._extract_lng(r),
-                "gf_item_count": r.gf_item_count,
-                "has_dedicated_gf_menu": r.has_dedicated_gf_menu,
+                "id": str(row[0].id),
+                "name": row[0].name,
+                "latitude": float(row[1]) if row[1] is not None else 0.0,
+                "longitude": float(row[2]) if row[2] is not None else 0.0,
+                "gf_item_count": row[0].gf_item_count,
+                "has_dedicated_gf_menu": row[0].has_dedicated_gf_menu,
             }
-            for r in restaurants
+            for row in rows
         ]
 
-    async def _extract_lat(self, restaurant: Restaurant) -> float:
-        """Extract latitude from PostGIS geography column."""
-        result = await self.db.execute(
-            select(func.ST_Y(func.cast(restaurant.location, func.Geometry)))
-        )
-        return result.scalar() or 0.0
-
-    async def _extract_lng(self, restaurant: Restaurant) -> float:
-        """Extract longitude from PostGIS geography column."""
-        result = await self.db.execute(
-            select(func.ST_X(func.cast(restaurant.location, func.Geometry)))
-        )
-        return result.scalar() or 0.0
-
     async def trigger_discovery(
-        self, latitude: float, longitude: float, radius_m: int = 10000
+        self,
+        latitude: float,
+        longitude: float,
+        radius_m: int = 1500,
+        max_restaurants: int | None = None,
     ) -> str:
         """Trigger the background discovery pipeline. Returns the Celery task ID."""
+        from app.config import get_settings
         from app.workers.tasks.discover import discover_restaurants_task
 
-        task = discover_restaurants_task.delay(latitude, longitude, radius_m)
+        settings = get_settings()
+        cap = (
+            max_restaurants
+            if max_restaurants is not None
+            else settings.discovery_max_restaurants
+        )
+        task = discover_restaurants_task.delay(latitude, longitude, radius_m, cap)
         return task.id

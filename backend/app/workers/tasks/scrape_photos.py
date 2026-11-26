@@ -79,12 +79,29 @@ async def _scrape_and_store(restaurant_id: str) -> list[uuid.UUID]:
             logger.warning("Restaurant %s not found", restaurant_id)
             return []
 
+        from app.config import get_settings
+
+        settings = get_settings()
+        max_photos = settings.scrape_max_photos_per_source
+
+        # Skip if we already scraped photos for this restaurant (avoid retry duplicates)
+        existing_count = session.execute(
+            select(MenuPhoto).where(MenuPhoto.restaurant_id == restaurant.id)
+        ).scalars().all()
+        if existing_count:
+            logger.info(
+                "Restaurant %s already has %d photos; skipping scrape",
+                restaurant_id,
+                len(existing_count),
+            )
+            return [p.id for p in existing_count]
+
         # Google Places photos
         if restaurant.google_place_id:
             google_client = GooglePlacesClient()
             try:
                 photos = await google_client.get_place_photos(restaurant.google_place_id)
-                for photo in photos[:5]:  # Limit to 5 photos per source
+                for photo in photos[:max_photos]:
                     try:
                         photo_bytes = await google_client.download_photo(
                             photo.photo_reference
@@ -95,13 +112,13 @@ async def _scrape_and_store(restaurant_id: str) -> list[uuid.UUID]:
                                 photo_bytes, storage.bucket_raw, s3_key
                             )
 
+                            # Do NOT store Google photo URL with API key embedded.
+                            # Serve from MinIO via presigned URLs instead.
                             menu_photo = MenuPhoto(
                                 restaurant_id=restaurant.id,
                                 source=PhotoSource.GOOGLE,
                                 s3_key=s3_key,
-                                photo_url=google_client.get_photo_url(
-                                    photo.photo_reference
-                                ),
+                                photo_url=None,
                             )
                             session.add(menu_photo)
                             session.flush()
@@ -111,13 +128,13 @@ async def _scrape_and_store(restaurant_id: str) -> list[uuid.UUID]:
             finally:
                 await google_client.close()
 
-        # Yelp photos
-        if restaurant.yelp_id:
+        # Yelp photos (disabled by default during free-tier testing)
+        if settings.scrape_yelp_photos and restaurant.yelp_id:
             yelp_client = YelpClient()
             try:
                 biz = await yelp_client.get_business_details(restaurant.yelp_id)
                 if biz and biz.photos:
-                    for photo_url in biz.photos[:5]:
+                    for photo_url in biz.photos[:max_photos]:
                         try:
                             photo_bytes = await yelp_client.download_photo(photo_url)
                             if photo_bytes:

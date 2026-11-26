@@ -105,6 +105,7 @@ class OpenAIVisionClient:
 
         for attempt in range(3):
             try:
+                settings = get_settings()
                 response = await client.chat.completions.create(
                     model=self.model,
                     messages=[
@@ -116,13 +117,13 @@ class OpenAIVisionClient:
                                     "type": "image_url",
                                     "image_url": {
                                         "url": f"data:{mime_type};base64,{b64_image}",
-                                        "detail": "high",
+                                        "detail": settings.openai_vision_detail,
                                     },
                                 },
                             ],
                         }
                     ],
-                    max_tokens=4096,
+                    max_tokens=settings.openai_max_tokens,
                     temperature=0.1,
                     response_format={"type": "json_object"},
                 )
@@ -170,10 +171,11 @@ class OpenAIVisionClient:
 
         for attempt in range(3):
             try:
+                settings = get_settings()
                 response = await client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=4096,
+                    max_tokens=settings.openai_max_tokens,
                     temperature=0.1,
                     response_format={"type": "json_object"},
                 )

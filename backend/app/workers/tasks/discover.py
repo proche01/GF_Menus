@@ -40,14 +40,23 @@ def _get_sync_session():
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def discover_restaurants_task(self, latitude: float, longitude: float, radius_m: int = 10000):
+def discover_restaurants_task(
+    self,
+    latitude: float,
+    longitude: float,
+    radius_m: int = 1500,
+    max_restaurants: int = 2,
+):
     """
     Discover restaurants near a location and store them in the database.
     Chains to scrape_photos for each newly discovered restaurant.
+
+    max_restaurants hard-caps how many NEW restaurants enter the photo/OCR
+    pipeline — critical for free-tier API keys.
     """
     logger.info(
-        "Discovering restaurants near (%s, %s) radius=%dm",
-        latitude, longitude, radius_m,
+        "Discovering restaurants near (%s, %s) radius=%dm max=%d",
+        latitude, longitude, radius_m, max_restaurants,
     )
 
     loop = asyncio.new_event_loop()
@@ -55,9 +64,9 @@ def discover_restaurants_task(self, latitude: float, longitude: float, radius_m:
 
     try:
         new_restaurant_ids = loop.run_until_complete(
-            _discover_and_store(latitude, longitude, radius_m)
+            _discover_and_store(latitude, longitude, radius_m, max_restaurants)
         )
-        logger.info("Discovered %d new restaurants", len(new_restaurant_ids))
+        logger.info("Discovered %d new restaurants (capped)", len(new_restaurant_ids))
 
         # Chain to photo scraping for each new restaurant
         from app.workers.tasks.scrape_photos import scrape_restaurant_photos_task
@@ -65,7 +74,11 @@ def discover_restaurants_task(self, latitude: float, longitude: float, radius_m:
         for rest_id in new_restaurant_ids:
             scrape_restaurant_photos_task.delay(str(rest_id))
 
-        return {"new_restaurants": len(new_restaurant_ids), "ids": [str(r) for r in new_restaurant_ids]}
+        return {
+            "new_restaurants": len(new_restaurant_ids),
+            "ids": [str(r) for r in new_restaurant_ids],
+            "max_restaurants": max_restaurants,
+        }
 
     except Exception as exc:
         logger.error("Discovery failed: %s", exc)
@@ -75,9 +88,12 @@ def discover_restaurants_task(self, latitude: float, longitude: float, radius_m:
 
 
 async def _discover_and_store(
-    latitude: float, longitude: float, radius_m: int
+    latitude: float,
+    longitude: float,
+    radius_m: int,
+    max_restaurants: int,
 ) -> list[uuid.UUID]:
-    """Fetch from Google + Yelp and upsert into the DB."""
+    """Fetch from Google + Yelp and upsert into the DB, respecting max_restaurants."""
     from app.integrations.google_places import GooglePlacesClient
     from app.integrations.yelp import YelpClient
 
@@ -85,13 +101,16 @@ async def _discover_and_store(
     session = _get_sync_session()
 
     try:
-        # Google Places
+        # Google Places first (usually higher-quality place IDs for photos)
         google_client = GooglePlacesClient()
         try:
             results, _ = await google_client.nearby_search(
                 latitude, longitude, radius_m
             )
             for place in results:
+                if len(new_ids) >= max_restaurants:
+                    break
+
                 existing = session.execute(
                     select(Restaurant).where(
                         Restaurant.google_place_id == place.place_id
@@ -112,41 +131,43 @@ async def _discover_and_store(
         finally:
             await google_client.close()
 
-        # Yelp
-        yelp_client = YelpClient()
-        try:
-            businesses = await yelp_client.search_businesses(
-                latitude, longitude, radius_m
-            )
-            for biz in businesses:
-                existing = session.execute(
-                    select(Restaurant).where(Restaurant.yelp_id == biz.yelp_id)
-                ).scalar_one_or_none()
-
-                if existing is None:
-                    # Check if same restaurant was already added via Google
-                    name_match = session.execute(
-                        select(Restaurant).where(
-                            Restaurant.name == biz.name,
-                            Restaurant.yelp_id.is_(None),
-                        )
+        # Yelp — only fill remaining slots; merge yelp_id onto Google matches
+        if len(new_ids) < max_restaurants:
+            yelp_client = YelpClient()
+            try:
+                # Keep Yelp page small to conserve Fusion free-tier quota
+                businesses = await yelp_client.search_businesses(
+                    latitude, longitude, radius_m, limit=min(10, max_restaurants * 3)
+                )
+                for biz in businesses:
+                    existing = session.execute(
+                        select(Restaurant).where(Restaurant.yelp_id == biz.yelp_id)
                     ).scalar_one_or_none()
 
-                    if name_match:
-                        name_match.yelp_id = biz.yelp_id
-                    else:
-                        restaurant = Restaurant(
-                            name=biz.name,
-                            address=biz.address,
-                            location=f"SRID=4326;POINT({biz.longitude} {biz.latitude})",
-                            yelp_id=biz.yelp_id,
-                            slug=_slugify(biz.name, biz.address),
-                        )
-                        session.add(restaurant)
-                        session.flush()
-                        new_ids.append(restaurant.id)
-        finally:
-            await yelp_client.close()
+                    if existing is None:
+                        # Check if same restaurant was already added via Google
+                        name_match = session.execute(
+                            select(Restaurant).where(
+                                Restaurant.name == biz.name,
+                                Restaurant.yelp_id.is_(None),
+                            )
+                        ).scalar_one_or_none()
+
+                        if name_match:
+                            name_match.yelp_id = biz.yelp_id
+                        elif len(new_ids) < max_restaurants:
+                            restaurant = Restaurant(
+                                name=biz.name,
+                                address=biz.address,
+                                location=f"SRID=4326;POINT({biz.longitude} {biz.latitude})",
+                                yelp_id=biz.yelp_id,
+                                slug=_slugify(biz.name, biz.address),
+                            )
+                            session.add(restaurant)
+                            session.flush()
+                            new_ids.append(restaurant.id)
+            finally:
+                await yelp_client.close()
 
         session.commit()
 

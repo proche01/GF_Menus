@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     # S3 / MinIO
     s3_endpoint_url: str = "http://localhost:9000"
+    # Browser-facing endpoint for presigned URLs (Docker internal host is not reachable
+    # from the user's browser). Defaults to s3_endpoint_url when unset.
+    s3_public_endpoint_url: str = "http://localhost:9000"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
     s3_bucket_raw_photos: str = "menu-photos-raw"
@@ -33,7 +36,16 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
+    # Prefer mini for free-tier / low-cost testing; override to gpt-4o in prod.
+    openai_model: str = "gpt-4o-mini"
+    openai_vision_detail: str = "low"
+    openai_max_tokens: int = 2048
+
+    # Free-tier / low-usage ingestion caps
+    discovery_max_restaurants: int = 2
+    scrape_max_photos_per_source: int = 1
+    # Skip Yelp photo downloads during low-usage tests (Yelp search still used for discovery).
+    scrape_yelp_photos: bool = False
 
     # CORS
     cors_origins: list[str] = ["http://localhost:3000"]

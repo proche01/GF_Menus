@@ -46,8 +46,13 @@ The PostGIS image creates system tables (tiger geocoder) that Alembic autogenera
 
 ### Key Gotchas
 
-- **Enum values:** The Python enums `PhotoSource` and `CrossContactRisk` use lowercase values (`"google"`, `"low"`, etc.), but Alembic autogenerate uses uppercase member names. Manually fix enum values in generated migrations.
+- **Enum values:** Models must use `values_callable` so SQLAlchemy persists lowercase enum values matching the DB (`"google"`, `"low"`, etc.). Alembic autogenerate still emits uppercase member names — manually fix generated migrations.
 - **GeoAlchemy2 spatial index:** The `Geography` column type auto-creates a spatial index. Remove any duplicate `create_index` for `idx_restaurants_location` from generated migrations.
+- **Geo casts:** Use `cast(..., Geography)` / `cast(..., Geometry)` from SQLAlchemy + GeoAlchemy2 types. Never use `func.cast(..., func.Geography)` (breaks SQLAlchemy cache keys).
+- **Celery imports:** Tasks are registered via `celery_app.conf.imports` in `app/workers/celery_app.py`. Do not rely on `autodiscover_tasks` with nested task modules.
+- **MinIO image:** Official `minio/minio` was removed from Docker Hub. Compose uses `pgsty/minio:latest`.
+- **Sync DB URL:** Use `postgresql+psycopg2://...` for `DATABASE_URL_SYNC` (SQLAlchemy 2.1+ resolves bare `postgresql://` to psycopg3).
+- **Free-tier caps:** Defaults cap discovery to 2 restaurants and 1 photo/source, use `gpt-4o-mini` + Vision `detail=low`, and skip Yelp photo downloads. Override via env if needed.
 - **Frontend ESLint:** No `eslint.config.mjs` exists yet. `next lint` is deprecated in Next.js 15+ and requires interactive config, so it cannot be run non-interactively.
 - **Frontend TypeScript:** There are pre-existing type errors in `restaurant/[slug]/page.tsx` and `restaurant/[slug]/menu/page.tsx` (`MenuItem[]` vs `GFMenuItem[]`). `next build` fails, but `next dev` works fine.
 - **Backend tests:** Only `conftest.py` exists in `backend/tests/` with a fixture. No test files exist yet (`pytest` exits with code 5 = no tests collected).

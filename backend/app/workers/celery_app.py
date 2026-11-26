@@ -18,12 +18,13 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Explicit imports — autodiscover_tasks(related_name='tasks') would look
+    # for app.workers.tasks.discover.tasks which does not exist.
+    imports=(
+        "app.workers.tasks.discover",
+        "app.workers.tasks.scrape_photos",
+        "app.workers.tasks.ocr",
+        "app.workers.tasks.classify",
+        "app.workers.tasks.generate_menu",
+    ),
 )
-
-celery_app.autodiscover_tasks([
-    "app.workers.tasks.discover",
-    "app.workers.tasks.scrape_photos",
-    "app.workers.tasks.ocr",
-    "app.workers.tasks.classify",
-    "app.workers.tasks.generate_menu",
-])
