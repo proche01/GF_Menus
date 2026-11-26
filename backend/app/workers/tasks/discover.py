@@ -131,13 +131,16 @@ async def _discover_and_store(
         finally:
             await google_client.close()
 
-        # Yelp — only fill remaining slots; merge yelp_id onto Google matches
+        # Yelp — optional. Failures must NOT roll back Google discoveries
+        # (free-tier Yelp keys are often missing/invalid).
         if len(new_ids) < max_restaurants:
             yelp_client = YelpClient()
             try:
-                # Keep Yelp page small to conserve Fusion free-tier quota
                 businesses = await yelp_client.search_businesses(
-                    latitude, longitude, radius_m, limit=min(10, max_restaurants * 3)
+                    latitude,
+                    longitude,
+                    radius_m,
+                    limit=min(10, max_restaurants * 3),
                 )
                 for biz in businesses:
                     existing = session.execute(
@@ -145,7 +148,6 @@ async def _discover_and_store(
                     ).scalar_one_or_none()
 
                     if existing is None:
-                        # Check if same restaurant was already added via Google
                         name_match = session.execute(
                             select(Restaurant).where(
                                 Restaurant.name == biz.name,
@@ -166,6 +168,10 @@ async def _discover_and_store(
                             session.add(restaurant)
                             session.flush()
                             new_ids.append(restaurant.id)
+            except Exception as yelp_exc:
+                logger.warning(
+                    "Yelp discovery skipped (non-fatal): %s", yelp_exc
+                )
             finally:
                 await yelp_client.close()
 
